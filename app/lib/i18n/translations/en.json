@@ -274,8 +274,6 @@
         "postpone": "Snooze 1 min",
         "skipToNext": "Skip to the next episode",
         "previousEpisode": "Previous episode",
-        "back10": "Back 10 seconds",
-        "forward10": "Forward 10 seconds",
         "pause": "Pause",
         "play": "Play",
         "live": "Live",
@@ -287,9 +285,6 @@
         "disableSubtitles": "Disable subtitles",
         "enterFullscreen": "Fullscreen",
         "exitFullscreen": "Exit fullscreen",
-        "mute": "Mute",
-        "unmute": "Unmute",
-        "volumeControl": "Volume control",
         "videoProgress": "Video progress",
         "back": "Back",
         "loadingSlow": "Loading is taking a while.",
@@ -298,7 +293,11 @@
         "errorHlsUnsupported": "Your browser does not support HLS playback.",
         "errorFormatUnsupported": "Unsupported video format.",
         "errorPlayback": "Playback error: {message}",
-        "errorVideoLoad": "The video could not be loaded."
+        "errorVideoLoad": "The video could not be loaded.",
+        "previousChannel": "Previous channel",
+        "nextChannel": "Next channel",
+        "startOver": "Watch from the beginning",
+        "resumedFrom": "Resumed at {time}"
     },
     "broadcast": {
         "start": "Broadcast",

@@ -6,14 +6,15 @@ import { useNavigationOverride } from '@/app/context/NavigationContext';
 import { useProfile } from '@/app/context/ProfileContext';
 import { useT } from '@/app/context/I18nContext';
 import { getDeviceProfile } from '@/app/lib/deviceProfile';
-import { getMediaKeyAction, isOkKey } from '@/app/lib/platform/keys';
+import { getChannelKeyDirection, getMediaKeyAction, isBackKey, isOkKey } from '@/app/lib/platform/keys';
+import { usePlayerScrub } from '@/app/hooks/usePlayerScrub';
 import { getDeviceToken, getServerBaseUrl } from '@/app/lib/apiClient';
 import PlayerTopBar from '@/components/player/PlayerTopBar';
 import PlayerControls from '@/components/player/PlayerControls';
 import PlayerOverlays from '@/components/player/PlayerOverlays';
 import NextEpisodePrompt from '@/components/player/NextEpisodePrompt';
+import StartOverPrompt from '@/components/player/StartOverPrompt';
 import type { SeekBarProps } from '@/components/player/SeekBar';
-import type { VolumeControlProps } from '@/components/player/VolumeControl';
 
 type VideoPreloadMode = 'auto' | 'metadata' | 'none';
 
@@ -72,6 +73,14 @@ const NEXT_EPISODE_POSTPONE_SEC = 60;
  * This way a partial estimate mid-video never triggers the automatic skip.
  */
 const DURATION_STABLE_SEC = 6;
+/** How close the playhead must land to the resume point to count as resumed. */
+const RESUME_TOLERANCE_SEC = 3;
+/** Re-seeks allowed before giving up on the resume point (webOS drops early seeks). */
+const RESUME_MAX_ATTEMPTS = 6;
+/** Minimum spacing between re-seeks, so a slow seek is not interrupted by the next. */
+const RESUME_RETRY_INTERVAL_MS = 1000;
+/** How long the "watch from the beginning" offer stays up after a resume. */
+const START_OVER_PROMPT_MS = 10000;
 
 function getPlaybackProfile(): PlaybackProfile {
     if (typeof window === 'undefined') {
@@ -169,6 +178,14 @@ interface VideoPlayerProps {
      * typically reacts by switching to a same-origin relay path (Modo TV).
      */
     onCorsFallback?: () => void;
+    /**
+     * Live only: switch to the previous (-1) or next (1) channel. Wired to the
+     * remote's CH+/CH−, the transport Next/Previous keys, ↑/↓ while the
+     * controls are hidden, and the control bar's channel buttons.
+     */
+    onChannelStep?: (direction: 1 | -1) => void;
+    /** Extra on-video overlay (e.g. the live channel banner). */
+    overlaySlot?: React.ReactNode;
 }
 
 /** True when `src` resolves to an origin other than the page's own. */
@@ -220,15 +237,15 @@ export default function VideoPlayer({
     timeOffset = 0,
     totalDuration = 0,
     onSeekBeyondWindow,
-    onCorsFallback
+    onCorsFallback,
+    onChannelStep,
+    overlaySlot,
 }: VideoPlayerProps) {
     const { activeProfile, updatePrefs } = useProfile();
     const t = useT();
     const videoRef = useRef<HTMLVideoElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
-    const [isMuted, setIsMuted] = useState(false);
-    const [volume, setVolume] = useState(1);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [error, setError] = useState('');
     const [showControls, setShowControls] = useState(true);
@@ -258,6 +275,12 @@ export default function VideoPlayer({
     const skipIndicatorTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const centerIconTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const nextEpisodePromptRef = useRef<HTMLDivElement>(null);
+    const controlsOverlayRef = useRef<HTMLDivElement>(null);
+    const startOverPromptRef = useRef<HTMLDivElement>(null);
+    const startOverButtonRef = useRef<HTMLButtonElement>(null);
+    /** Set when "continue watching" resumed mid-title; tied to its `src` so an episode change drops it. */
+    const [startOver, setStartOver] = useState<{ src: string; from: number } | null>(null);
+    const seekInputRef = useRef<HTMLInputElement>(null);
     const nextEpisodeButtonRef = useRef<HTMLButtonElement>(null);
     const postponeButtonRef = useRef<HTMLButtonElement>(null);
     const autoSkipFiredRef = useRef(false);
@@ -402,9 +425,12 @@ export default function VideoPlayer({
         };
     }, [isCurrentlyFullscreen]);
 
+    /**
+     * True once the resume position (`initialTime`) is confirmed under the
+     * playhead — or abandoned, or overridden by a seek of the user's own.
+     * Progress is not reported before that (see the setup effect).
+     */
     const hasAppliedInitialTime = useRef(false);
-    /** Snapshot of `initialTime` at the moment `src` changes — avoids recreating HLS when the checkpoint updates. */
-    const initialSeekForActiveSrcRef = useRef(0);
     const onProgressRef = useRef(onProgress);
     const onMetadataRef = useRef(onMetadata);
     const onNextRef = useRef(onNext);
@@ -447,6 +473,9 @@ export default function VideoPlayer({
     const isBroadcastTimeline = totalDuration > 0;
     const displayTime = isBroadcastTimeline ? timeOffset + currentTime : currentTime;
     const displayDuration = isBroadcastTimeline ? totalDuration : duration;
+    // In Modo TV the stream's own duration is just the sliding window (a few seconds,
+    // and growing) — the title's real timeline comes from the offset + known duration.
+    const isLive = isBroadcastTimeline ? false : (duration === Infinity || duration === 0);
 
     // Next-episode prompt: series only (onNext + hasNext), never on live/unknown duration.
     // Everything is anchored to the title's timeline, so the countdown freezes on pause and
@@ -475,12 +504,6 @@ export default function VideoPlayer({
         autoSkipFiredRef.current = true;
         onNextRef.current?.();
     }, [showNextEpisodePrompt, displayTime, autoSkipAt]);
-
-    useEffect(() => {
-        if (showNextEpisodePrompt) {
-            nextEpisodeButtonRef.current?.focus();
-        }
-    }, [showNextEpisodePrompt]);
 
     const handlePostponeNextEpisode = useCallback(() => {
         const videoTime = videoRef.current?.currentTime ?? 0;
@@ -536,15 +559,6 @@ export default function VideoPlayer({
         }
     }, [showCenterIcon]);
 
-    const toggleMute = useCallback(() => {
-        if (videoRef.current) {
-            videoRef.current.muted = !videoRef.current.muted;
-            setIsMuted(videoRef.current.muted);
-        }
-    }, []);
-
-
-
     /**
      * Seeks using the title's own timeline (Modo TV). Only ~30s of the title exists on
      * disk at a time, so a jump inside that window is a normal seek, and anything else
@@ -570,6 +584,8 @@ export default function VideoPlayer({
     }, [timeOffset, totalDuration, onSeekBeyondWindow]);
 
     const handleSeek = useCallback((time: number) => {
+        // The user picked a position: the pending resume must not drag it back.
+        hasAppliedInitialTime.current = true;
         if (isBroadcastTimeline) {
             seekToAbsolute(time);
             return;
@@ -580,8 +596,57 @@ export default function VideoPlayer({
         }
     }, [isBroadcastTimeline, seekToAbsolute]);
 
+    /** Playhead on the displayed timeline (title time in Modo TV), read fresh from the element. */
+    const getDisplayTime = useCallback(() => {
+        const videoTime = videoRef.current?.currentTime ?? 0;
+        return isBroadcastTimeline ? timeOffset + videoTime : videoTime;
+    }, [isBroadcastTimeline, timeOffset]);
+
+    const { scrub, scrubRef, step: scrubStep, release: releaseScrub, commit: commitScrub, cancel: cancelScrub } = usePlayerScrub({
+        getCurrentTime: getDisplayTime,
+        duration: displayDuration,
+        onCommit: handleSeek,
+    });
+    const isScrubbing = scrub !== null;
+
+    // A pending preview belongs to the title it was started on.
+    useEffect(() => {
+        cancelScrub();
+    }, [src, cancelScrub]);
+
+    useEffect(() => {
+        // Never yank focus off the seek bar mid-scrub: the user is choosing a position.
+        if (showNextEpisodePrompt && !scrubRef.current) {
+            nextEpisodeButtonRef.current?.focus();
+        }
+    }, [showNextEpisodePrompt, scrubRef]);
+
+    // "Watch from the beginning": offered for a few seconds after a resume.
+    const showStartOver = startOver !== null && startOver.src === src && !showNextEpisodePrompt;
+
+    useEffect(() => {
+        if (!startOver) return;
+        const timer = window.setTimeout(() => setStartOver(null), START_OVER_PROMPT_MS);
+        return () => window.clearTimeout(timer);
+    }, [startOver]);
+
+    // Focus goes to the offer so one OK restarts — but only if the remote is
+    // idle: a user already scrubbing or moving through the controls keeps
+    // their place.
+    useEffect(() => {
+        if (showStartOver && !scrubRef.current && document.activeElement === document.body) {
+            startOverButtonRef.current?.focus();
+        }
+    }, [showStartOver, scrubRef]);
+
+    const handleStartOver = useCallback(() => {
+        setStartOver(null);
+        handleSeek(0);
+    }, [handleSeek]);
+
     const skip = useCallback((seconds: number) => {
         if (!videoRef.current) return;
+        hasAppliedInitialTime.current = true;
         if (isBroadcastTimeline) {
             seekToAbsolute(timeOffset + videoRef.current.currentTime + seconds);
         } else {
@@ -590,40 +655,8 @@ export default function VideoPlayer({
         showSkipFeedback(seconds);
     }, [showSkipFeedback, isBroadcastTimeline, seekToAbsolute, timeOffset]);
 
-    const adjustVolume = useCallback((delta: number) => {
-        if (videoRef.current) {
-            const newVolume = Math.max(0, Math.min(1, videoRef.current.volume + delta));
-            videoRef.current.volume = newVolume;
-            setVolume(newVolume);
-            if (newVolume === 0) {
-                setIsMuted(true);
-                videoRef.current.muted = true;
-            } else if (isMuted) {
-                setIsMuted(false);
-                videoRef.current.muted = false;
-            }
-        }
-    }, [isMuted]);
-
-    /**
-     * Slider-driven volume change (VolumeControl). Kept beside `adjustVolume`
-     * so the mute/unmute decision on 0/non-zero volume lives in one place
-     * instead of being duplicated in the presentation layer (spec 05 §4).
-     */
-    const handleVolumeChange = useCallback((next: number) => {
-        if (!videoRef.current) return;
-        videoRef.current.volume = next;
-        setVolume(next);
-        if (next === 0) {
-            setIsMuted(true);
-            videoRef.current.muted = true;
-        } else if (isMuted) {
-            setIsMuted(false);
-            videoRef.current.muted = false;
-        }
-    }, [isMuted]);
-
     const jumpToPercent = useCallback((percent: number) => {
+        hasAppliedInitialTime.current = true;
         if (isBroadcastTimeline) {
             seekToAbsolute((percent / 100) * totalDuration);
             return;
@@ -638,49 +671,157 @@ export default function VideoPlayer({
     // before autoplay kicks in) still sees the current state when it fires.
     const isPlayingRef = useRef(isPlaying);
 
+    const showControlsRef = useRef(showControls);
+    useEffect(() => { showControlsRef.current = showControls; }, [showControls]);
+
+    /**
+     * Hides the overlay and drops focus out of it. A control keeping focus while
+     * invisible would turn the next OK into a blind click (fullscreen, next
+     * episode…); with focus released, the next key press only wakes the controls.
+     */
+    const hideControls = useCallback(() => {
+        showControlsRef.current = false;
+        setShowControls(false);
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && controlsOverlayRef.current?.contains(active)) {
+            active.blur();
+        }
+    }, []);
+
     const scheduleControlsHide = useCallback(() => {
         if (controlsTimeoutRef.current) {
             clearTimeout(controlsTimeoutRef.current);
         }
 
         controlsTimeoutRef.current = setTimeout(() => {
-            if (isPlayingRef.current) setShowControls(false);
+            // A scrub in progress keeps the bar up; its commit re-arms the timer.
+            if (isPlayingRef.current && !scrubRef.current) hideControls();
         }, 3000);
-    }, []);
+    }, [hideControls, scrubRef]);
 
     const handleInteraction = useCallback(() => {
+        showControlsRef.current = true;
         setShowControls(true);
         scheduleControlsHide();
     }, [scheduleControlsHide]);
 
     // Playback starting (autoplay, play key, sync command) is not a user
     // interaction, so arm the auto-hide here too — otherwise the controls stay
-    // up until the next mouse move/key press.
+    // up until the next mouse move/key press. (Pausing brings them back — see
+    // updatePlayState in the setup effect.)
     useEffect(() => {
         isPlayingRef.current = isPlaying;
         if (isPlaying) scheduleControlsHide();
     }, [isPlaying, scheduleControlsHide]);
 
+    useEffect(() => {
+        if (!isScrubbing) scheduleControlsHide();
+    }, [isScrubbing, scheduleControlsHide]);
+
     useEffect(() => () => {
         if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
     }, []);
 
-    // Keyboard controls
+    // Remote / keyboard controls.
+    //
+    // Registered on window in the CAPTURE phase so it runs before the global
+    // D-pad navigator (useTvNavigation, a bubble listener) and can claim a key
+    // outright with stopPropagation. Keys it does not claim — arrows between
+    // the control-bar buttons, Back when there is nothing to undo — fall
+    // through to the navigator untouched.
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
-            // Ignore if typing in an input
-            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+            const container = containerRef.current;
+            if (!container) return;
+
+            const active = document.activeElement;
+            const hasFocus = active instanceof HTMLElement && active !== document.body;
+            // A modal (diagnostics, broadcast start…) owns the remote while open.
+            if (hasFocus && active.closest('[role="dialog"]')) return;
+            // Focus on page UI outside the player: not ours to drive.
+            if (hasFocus && !container.contains(active)) return;
+            if (active instanceof HTMLTextAreaElement) return;
+            // The error screen is plain D-pad navigation (diagnostics, Back).
+            if (error) return;
+
+            const claim = () => {
+                e.preventDefault();
+                e.stopPropagation();
+            };
+
+            const key = e.key.toLowerCase();
+            const isLeft = key === 'arrowleft';
+            const isRight = key === 'arrowright';
+            const isVertical = key === 'arrowup' || key === 'arrowdown';
+            const isOk = isOkKey(e);
+            const isBack = isBackKey(e);
+            const canScrub = !isLive;
+            const seekInput = seekInputRef.current;
+            const onSeekBar = hasFocus && seekInput !== null && active === seekInput;
+            const inPrompt = hasFocus && Boolean(nextEpisodePromptRef.current?.contains(active));
+            // OK on the start-over offer restarts the title; arrows leave it
+            // and behave as usual (wake, scrub).
+            const inStartOver = hasFocus && Boolean(startOverPromptRef.current?.contains(active));
+
+            // Where the D-pad cursor lands when the controls come up: the
+            // timeline on VOD (so Left/Right scrub right away), play/pause on live.
+            const focusEntryPoint = () => {
+                const target = canScrub && seekInput
+                    ? seekInput
+                    : container.querySelector<HTMLElement>('[data-player-primary="true"]');
+                target?.focus();
+            };
+
+            const wasHidden = !showControlsRef.current;
+
+            // Back: undo the innermost thing first — a pending scrub, then the
+            // visible controls — and only then let the navigator leave the player.
+            if (isBack) {
+                if (showStartOver) {
+                    claim();
+                    setStartOver(null);
+                    return;
+                }
+                if (scrubRef.current) {
+                    claim();
+                    cancelScrub();
+                    handleInteraction();
+                    return;
+                }
+                // Read the element, not isPlaying: right after a play/pause the
+                // state is still a render behind.
+                const playing = Boolean(videoRef.current && !videoRef.current.paused);
+                if (!wasHidden && playing && !inPrompt && !document.fullscreenElement) {
+                    claim();
+                    hideControls();
+                    return;
+                }
                 return;
             }
 
-            const key = e.key.toLowerCase();
+            // Channel zapping (live). Handled before the wake below: like a TV
+            // set, flipping channels shows only the channel banner, not the
+            // whole control bar.
+            if (isLive && onChannelStep) {
+                const media = getMediaKeyAction(e);
+                const zapDirection = getChannelKeyDirection(e)
+                    ?? (media === 'next' ? 1 : media === 'previous' ? -1 : null)
+                    ?? ((wasHidden || !hasFocus) && !inPrompt && isVertical ? (key === 'arrowup' ? 1 : -1) : null);
+                if (zapDirection !== null) {
+                    claim();
+                    onChannelStep(zapDirection);
+                    return;
+                }
+            }
 
-            // Dedicated transport keys on a TV remote (Play/Pause/Stop/FF/Rew/
-            // Track). They carry an explicit intent, so they act regardless of
-            // what is focused — unlike OK below, which must yield to buttons.
+            // Any other key wakes the controls and restarts the auto-hide timer.
+            handleInteraction();
+
+            // Dedicated transport keys on a TV remote carry an explicit intent,
+            // so they act regardless of what is focused.
             const mediaAction = getMediaKeyAction(e);
             if (mediaAction) {
-                e.preventDefault();
+                claim();
                 switch (mediaAction) {
                     case 'playpause':
                         togglePlay();
@@ -696,11 +837,15 @@ export default function VideoPlayer({
                         onBackRef.current?.();
                         break;
                     case 'forward':
-                        skip(10);
+                    case 'rewind': {
+                        const direction = mediaAction === 'forward' ? 1 : -1;
+                        if (canScrub) {
+                            scrubStep(direction);
+                        } else {
+                            skip(direction * 10);
+                        }
                         break;
-                    case 'rewind':
-                        skip(-10);
-                        break;
+                    }
                     case 'next':
                         onNextRef.current?.();
                         break;
@@ -711,16 +856,78 @@ export default function VideoPlayer({
                 return;
             }
 
-            // OK / Enter. webOS does not reliably synthesize a `click` from an
-            // Enter press on a focused element, so a control-bar button focused
-            // by the D-pad never activated by remote. Drive it explicitly:
-            // preventDefault() suppresses the native activation where it does
-            // happen (desktop), then one manual click fires everywhere. With
-            // nothing focused, OK toggles play like the video click does.
-            if (isOkKey(e)) {
-                e.preventDefault();
-                const active = document.activeElement;
-                const control = active instanceof HTMLElement && active !== document.body
+            const isArrow = isLeft || isRight || isVertical;
+
+            // Wake press: with the controls hidden (or nothing focused, e.g.
+            // after mouse use), a D-pad key never acts on an invisible control.
+            // Left/Right go straight into a scrub, the others just reveal.
+            // The next-episode prompt keeps its focus and is handled below.
+            if ((wasHidden || !hasFocus || inStartOver) && !inPrompt && (isArrow || (isOk && !inStartOver))) {
+                claim();
+                focusEntryPoint();
+                if ((isLeft || isRight) && canScrub) {
+                    scrubStep(isRight ? 1 : -1);
+                } else if (isOk) {
+                    togglePlay();
+                }
+                return;
+            }
+
+            // Seek bar: Left/Right move the preview (accelerating while held),
+            // OK applies it (or toggles play), Down goes to the buttons.
+            if (onSeekBar) {
+                if (isLeft || isRight) {
+                    claim();
+                    scrubStep(isRight ? 1 : -1);
+                    return;
+                }
+                if (isOk) {
+                    claim();
+                    if (scrubRef.current) {
+                        commitScrub();
+                    } else {
+                        togglePlay();
+                    }
+                    return;
+                }
+                if (key === 'arrowdown') {
+                    claim();
+                    commitScrub();
+                    container.querySelector<HTMLElement>('[data-player-primary="true"]')?.focus();
+                    return;
+                }
+                if (key === 'arrowup') {
+                    // Leaving the bar applies what the user picked; the
+                    // navigator then moves up to the top bar.
+                    commitScrub();
+                    return;
+                }
+            }
+
+            // Down from the top bar lands on the timeline. Left to geometry, the
+            // full-width bar loses to whichever button sits under the focused one.
+            if (key === 'arrowdown' && canScrub && seekInput && hasFocus && active.closest('[data-player-topbar]')) {
+                claim();
+                seekInput.focus();
+                return;
+            }
+
+            // Next-episode prompt: Left/Right swap between its two buttons;
+            // Up/Down escape to the navigator.
+            if (inPrompt && (isLeft || isRight)) {
+                claim();
+                moveNextEpisodePromptFocus(isRight ? 'right' : 'left');
+                return;
+            }
+
+            // OK on a focused control. webOS does not reliably synthesize a
+            // `click` from an Enter press, so a D-pad-focused button never
+            // activated by remote: preventDefault() suppresses the native
+            // activation where it does happen (desktop), then one manual
+            // click fires everywhere.
+            if (isOk) {
+                claim();
+                const control = hasFocus
                     ? active.closest<HTMLElement>('button, a, [role="button"], [data-focusable="true"]')
                     : null;
                 if (control) {
@@ -731,72 +938,31 @@ export default function VideoPlayer({
                 return;
             }
 
-            // While focus sits inside the control bar, arrow keys must propagate
-            // untouched so useTvNavigation can move the D-pad cursor between its
-            // buttons — otherwise the buttons stay focusable but unreachable
-            // (spec 05 §3, corrects D6). The next-episode prompt has its own
-            // handler above (moveNextEpisodePromptFocus) and runs first, since
-            // its buttons live outside [data-player-controls].
-            if (key === 'arrowleft' || key === 'arrowright' || key === 'arrowup' || key === 'arrowdown') {
-                const activeElement = document.activeElement;
-                if (activeElement instanceof Element && activeElement.closest('[data-player-controls]')) {
-                    return;
-                }
-                // Up/Down inside the next-episode prompt must escape to the D-pad
-                // navigator instead of adjusting volume — the prompt only
-                // intercepts Left/Right itself (moveNextEpisodePromptFocus, below).
-                if (
-                    (key === 'arrowup' || key === 'arrowdown') &&
-                    activeElement instanceof Node &&
-                    nextEpisodePromptRef.current?.contains(activeElement)
-                ) {
-                    return;
-                }
-            }
+            // Arrows on a visible, focused control move the D-pad cursor
+            // between buttons — the navigator's job.
+            if (isArrow) return;
 
             switch (key) {
                 case ' ':
-                    e.preventDefault();
+                    // Claiming keydown also stops the focused button's own
+                    // Space activation, which would toggle a second time.
+                    claim();
                     togglePlay();
                     break;
-                case 'arrowleft':
-                    e.preventDefault();
-                    if (!moveNextEpisodePromptFocus('left')) {
-                        skip(e.ctrlKey || e.metaKey ? -10 : -5);
-                    }
-                    break;
-                case 'arrowright':
-                    e.preventDefault();
-                    if (!moveNextEpisodePromptFocus('right')) {
-                        skip(e.ctrlKey || e.metaKey ? 10 : 5);
-                    }
-                    break;
-                case 'arrowup':
-                    e.preventDefault();
-                    adjustVolume(0.05);
-                    break;
-                case 'arrowdown':
-                    e.preventDefault();
-                    adjustVolume(-0.05);
-                    break;
                 case 'f':
-                    e.preventDefault();
+                    claim();
                     toggleFullscreen();
                     break;
-                case 'm':
-                    e.preventDefault();
-                    toggleMute();
-                    break;
                 case 'c':
-                    e.preventDefault();
+                    claim();
                     toggleSubtitles();
                     break;
                 case ']':
-                    e.preventDefault();
+                    claim();
                     changeFontSize(0.1);
                     break;
                 case '[':
-                    e.preventDefault();
+                    claim();
                     changeFontSize(-0.1);
                     break;
                 case '0':
@@ -809,15 +975,33 @@ export default function VideoPlayer({
                 case '7':
                 case '8':
                 case '9':
-                    e.preventDefault();
-                    jumpToPercent(parseInt(e.key) * 10);
+                    claim();
+                    cancelScrub();
+                    jumpToPercent(parseInt(e.key, 10) * 10);
                     break;
             }
         };
 
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [togglePlay, skip, adjustVolume, toggleFullscreen, toggleMute, jumpToPercent, changeFontSize, toggleSubtitles, moveNextEpisodePromptFocus]);
+        // Ends the hold, so the scrub applies shortly after the key comes up.
+        const handleKeyUp = (e: KeyboardEvent) => {
+            const key = e.key.toLowerCase();
+            const action = getMediaKeyAction(e);
+            if (key === 'arrowleft' || key === 'arrowright' || action === 'forward' || action === 'rewind') {
+                releaseScrub();
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown, true);
+        window.addEventListener('keyup', handleKeyUp, true);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown, true);
+            window.removeEventListener('keyup', handleKeyUp, true);
+        };
+    }, [
+        togglePlay, skip, toggleFullscreen, jumpToPercent, changeFontSize,
+        toggleSubtitles, moveNextEpisodePromptFocus, error, isLive, scrubRef, scrubStep, releaseScrub,
+        commitScrub, cancelScrub, handleInteraction, hideControls, onChannelStep, showStartOver,
+    ]);
 
     // Video setup and HLS — deps only [src, autoPlay]: initialTime enters only as a snapshot (seekTarget) on source change; callbacks via refs (avoids checkpoint loop).
     useEffect(() => {
@@ -825,7 +1009,6 @@ export default function VideoPlayer({
         if (!video) return;
 
         const seekTarget = initialTime > 0 ? initialTime : 0;
-        initialSeekForActiveSrcRef.current = seekTarget;
 
         const resetPlaybackStateTimer = window.setTimeout(() => {
             const hasPlayableData = video.readyState >= 3 || !video.paused;
@@ -883,12 +1066,43 @@ export default function VideoPlayer({
             return Math.max(0, v.buffered.end(v.buffered.length - 1) - t);
         };
 
+        // Resume ("continuar assistindo"). A single seek at loadedmetadata is
+        // enough on desktop, but webOS's media pipeline silently drops a
+        // currentTime set before playback has really started (and can reset
+        // to 0 on play()), so the TV used to start from the beginning — and
+        // then overwrite the saved position with ~0. The seek is re-applied
+        // until the playhead is really there, and progress stays unreported
+        // until then.
+        let resumeAttempts = 0;
+        let lastResumeAttemptAt = 0;
+        const resumePending = () => seekTarget > 0 && !hasAppliedInitialTime.current;
+
         const applyInitialSeek = () => {
-            if (seekTarget > 0 && !hasAppliedInitialTime.current && video.readyState >= 1) {
-                console.log('[VideoPlayer] Seeking to initial time:', seekTarget);
-                video.currentTime = seekTarget;
+            if (!resumePending() || video.readyState < 1) return;
+            if (resumeAttempts >= RESUME_MAX_ATTEMPTS) {
+                console.warn('[VideoPlayer] Resume position never stuck; playing from where the player is.');
                 hasAppliedInitialTime.current = true;
+                return;
             }
+            resumeAttempts += 1;
+            lastResumeAttemptAt = Date.now();
+            console.log('[VideoPlayer] Seeking to initial time:', seekTarget, `(attempt ${resumeAttempts})`);
+            try {
+                video.currentTime = seekTarget;
+            } catch (e) {
+                console.warn('[VideoPlayer] Initial seek rejected:', e);
+            }
+        };
+
+        const confirmResume = () => {
+            if (!resumePending() || video.readyState < 1) return;
+            if (video.currentTime >= seekTarget - RESUME_TOLERANCE_SEC) {
+                hasAppliedInitialTime.current = true;
+                setStartOver({ src, from: seekTarget });
+                return;
+            }
+            if (video.seeking || Date.now() - lastResumeAttemptAt < RESUME_RETRY_INTERVAL_MS) return;
+            applyInitialSeek();
         };
 
         const safePlay = () => {
@@ -970,6 +1184,9 @@ export default function VideoPlayer({
             hls = new Hls({
                 enableWorker: playbackProfile.hls.enableWorker,
                 lowLatencyMode: false,
+                // VOD over hls.js starts loading at the resume point instead of
+                // fetching the opening segments and seeking away from them.
+                ...(!isLiveHls && seekTarget > 0 ? { startPosition: seekTarget } : {}),
                 backBufferLength: isLiveHls ? Math.min(45, playbackProfile.hls.backBufferLength) : playbackProfile.hls.backBufferLength,
                 maxBufferLength: isLiveHls ? Math.min(50, playbackProfile.hls.maxBufferLength) : playbackProfile.hls.maxBufferLength,
                 maxBufferHole: 0.25,
@@ -1078,7 +1295,12 @@ export default function VideoPlayer({
             }, { once: true });
         }
 
-        const updatePlayState = () => setIsPlaying(!video.paused);
+        const updatePlayState = () => {
+            setIsPlaying(!video.paused);
+            // A pause from any source (media key, sync command, the button)
+            // brings the controls back, as every player does.
+            if (video.paused) setShowControls(true);
+        };
 
         const updateBufferedFromVideo = () => {
             if (!video.buffered.length) return;
@@ -1118,11 +1340,10 @@ export default function VideoPlayer({
                 && video.currentTime - durationChangedAtTimeRef.current >= DURATION_STABLE_SEC;
             setDurationStable((prev) => (prev === stable ? prev : stable));
 
-            const isAtStart = video.currentTime === 0;
-            const waitingForSeek = seekTarget > 0 && !hasAppliedInitialTime.current;
+            confirmResume();
 
             const onProg = onProgressRef.current;
-            if (onProg && (!isAtStart || !waitingForSeek)) {
+            if (onProg && !resumePending()) {
                 onProg(video.currentTime, video.duration);
             }
 
@@ -1182,10 +1403,13 @@ export default function VideoPlayer({
             updateBufferedFromVideo();
         };
 
-        const handleVolumeChange = () => {
-            setVolume(video.volume);
-            setIsMuted(video.muted);
+        // The player has no volume control: level is the device's job (TV
+        // remote, OS mixer), so the element always plays at full volume.
+        const pinFullVolume = () => {
+            if (video.volume !== 1) video.volume = 1;
+            if (video.muted) video.muted = false;
         };
+        pinFullVolume();
 
         const handleVideoError = () => {
             const error = video.error;
@@ -1216,7 +1440,10 @@ export default function VideoPlayer({
         video.addEventListener('playing', handlePlaying);
         video.addEventListener('ended', handleEnded);
         video.addEventListener('error', handleVideoError);
-        video.addEventListener('volumechange', handleVolumeChange);
+        video.addEventListener('volumechange', pinFullVolume);
+        video.addEventListener('seeked', confirmResume);
+        video.addEventListener('playing', confirmResume);
+        video.addEventListener('canplay', confirmResume);
 
         if (!useHlsJs) {
             if (video.readyState >= 1) handleLoadedMetadata();
@@ -1242,39 +1469,14 @@ export default function VideoPlayer({
             video.removeEventListener('playing', handlePlaying);
             video.removeEventListener('ended', handleEnded);
             video.removeEventListener('error', handleVideoError);
-            video.removeEventListener('volumechange', handleVolumeChange);
+            video.removeEventListener('volumechange', pinFullVolume);
+            video.removeEventListener('seeked', confirmResume);
+            video.removeEventListener('playing', confirmResume);
+            video.removeEventListener('canplay', confirmResume);
         };
-        // `initialTime` is applied by the dedicated late-seek effect below, not here.
+        // `initialTime` enters only as the snapshot taken when `src` changes.
     }, [src, autoPlay, t]);
 
-    useEffect(() => {
-        const video = videoRef.current;
-        const target = initialSeekForActiveSrcRef.current;
-        if (!video || !target || hasAppliedInitialTime.current || !isMetadataLoaded) return;
-
-        const applySeek = () => {
-            if (target > 0 && !hasAppliedInitialTime.current && video.currentTime < 5) {
-                console.log('[VideoPlayer] Applying initialTime late:', target);
-                video.currentTime = target;
-                hasAppliedInitialTime.current = true;
-            }
-        };
-
-        if (video.readyState >= 1) {
-            applySeek();
-        } else {
-            const onLateMetadata = () => {
-                applySeek();
-                video.removeEventListener('loadedmetadata', onLateMetadata);
-            };
-            video.addEventListener('loadedmetadata', onLateMetadata);
-            return () => video.removeEventListener('loadedmetadata', onLateMetadata);
-        }
-    }, [src, isMetadataLoaded]);
-
-    // In Modo TV the stream's own duration is just the sliding window (a few seconds,
-    // and growing) — the title's real timeline comes from the offset + known duration.
-    const isLive = isBroadcastTimeline ? false : (duration === Infinity || duration === 0);
     // 0..1 — NextEpisodePrompt turns this into a CSS width percentage itself.
     const autoSkipProgress = (NEXT_EPISODE_AUTO_SKIP_SEC - autoSkipSecondsLeft) / NEXT_EPISODE_AUTO_SKIP_SEC;
 
@@ -1290,16 +1492,15 @@ export default function VideoPlayer({
         bufferedPercent,
         disabled: isLive,
         onSeek: handleSeek,
-        onSeekStart: () => setIsSeeking(true),
+        onSeekStart: () => {
+            cancelScrub();
+            setIsSeeking(true);
+        },
         onSeekEnd: () => setIsSeeking(false),
+        scrub,
+        inputRef: seekInputRef,
     };
 
-    const volumeControlProps: VolumeControlProps = {
-        volume,
-        muted: isMuted,
-        onToggleMute: toggleMute,
-        onVolumeChange: handleVolumeChange,
-    };
 
     return (
         <div
@@ -1309,11 +1510,11 @@ export default function VideoPlayer({
             // so a fixed height is exact.
             className="relative w-full h-[100vh] max-h-[100vh] bg-black overflow-hidden"
             style={containerStyle}
-            // The player expects nothing focused (OK toggles play, arrows seek/volume);
+            // The player expects nothing focused (OK toggles play, arrows seek);
             // keeps useAutoFocusMainContent from parking focus on the top bar's Back.
             data-no-autofocus="true"
             onMouseMove={handleInteraction}
-            onMouseLeave={() => isPlaying && setShowControls(false)}
+            onMouseLeave={() => isPlaying && hideControls()}
             onTouchStart={handleInteraction}
             // A D-pad focus move (useTvNavigation) fires a native `focus` event
             // that bubbles here — without this, the auto-hidden control bar
@@ -1355,6 +1556,15 @@ export default function VideoPlayer({
                 error={error}
             />
 
+            {overlaySlot}
+
+            <StartOverPrompt
+                resumedFrom={showStartOver ? startOver.from : null}
+                onStartOver={handleStartOver}
+                promptRef={startOverPromptRef}
+                buttonRef={startOverButtonRef}
+            />
+
             {/* Próximo episódio — último minuto, com pulo automático em 10s */}
             <NextEpisodePrompt
                 visible={showNextEpisodePrompt}
@@ -1369,6 +1579,7 @@ export default function VideoPlayer({
 
             {/* Controls Overlay */}
             <div
+                ref={controlsOverlayRef}
                 className={`absolute inset-0 z-10 transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
                 onMouseEnter={() => setShowControls(true)}
                 onClick={(e) => {
@@ -1392,12 +1603,12 @@ export default function VideoPlayer({
                 <PlayerControls
                     isPlaying={isPlaying}
                     onTogglePlay={togglePlay}
-                    onSkip={skip}
                     onPrevious={onPrevious}
                     onNext={onNext}
                     hasPrevious={hasPrevious}
                     hasNext={hasNext}
                     isLive={isLive}
+                    onChannelStep={isLive ? onChannelStep : undefined}
                     currentTime={displayTime}
                     duration={displayDuration}
                     subtitlesAvailable={subtitlesAvailable}
@@ -1408,7 +1619,6 @@ export default function VideoPlayer({
                     isFullscreen={isFullscreen}
                     onToggleFullscreen={toggleFullscreen}
                     seek={seekBarProps}
-                    volume={volumeControlProps}
                 />
             </div>
         </div>

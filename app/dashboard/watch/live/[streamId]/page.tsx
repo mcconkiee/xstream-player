@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { useAuth } from '@/app/context/AuthContext';
 import { useT } from '@/app/context/I18nContext';
@@ -12,6 +12,9 @@ import Badge from '@/components/ui/Badge';
 import { useShareBroadcast, useSyncPlayback, syncKey } from '@/app/hooks/useLiveShare';
 import { getAutoBroadcast } from '@/app/lib/device';
 import { apiUrl } from '@/app/lib/apiClient';
+import { useLiveChannelZap } from '@/app/hooks/useLiveChannelZap';
+import type { CatalogItem } from '@/app/lib/catalogItem';
+import ChannelBanner from '@/components/player/ChannelBanner';
 
 export default function WatchLivePage() {
     const { credentials } = useAuth();
@@ -19,12 +22,27 @@ export default function WatchLivePage() {
     const params = useParams();
     const router = useRouter();
     const searchParams = useSearchParams();
-    const streamId = params.streamId as string;
+    // Zapping swaps the channel in place (no remount, so the player and the
+    // broadcast toggle survive) and only rewrites the URL; this holds the
+    // channel the user tuned to since the page opened.
+    const [zappedId, setZappedId] = useState<string | null>(null);
+    const streamId = zappedId ?? (params.streamId as string);
 
     // Coming from "Modo TV": I watch another device broadcast (via relay, 0 new connection).
     const isJoining = searchParams.get('join') === '1';
-    const title = searchParams.get('title') || t('watch.channelFallback', { id: streamId });
-    const poster = searchParams.get('poster') || undefined;
+
+    const handleChannelSwitch = useCallback((channel: CatalogItem) => {
+        setZappedId(channel.id);
+        // replace, not push: Back returns to the channel grid, not through
+        // every channel flipped past.
+        window.history.replaceState(null, '', `/dashboard/watch/live/${encodeURIComponent(channel.id)}`);
+    }, []);
+    const zap = useLiveChannelZap(streamId, handleChannelSwitch);
+
+    // The query carries title/poster only for the channel the page was opened
+    // with (Modo TV join); after a switch they come from the channel list.
+    const title = (!zappedId && searchParams.get('title')) || zap.current?.name || t('watch.channelFallback', { id: streamId });
+    const poster = (!zappedId && searchParams.get('poster')) || zap.current?.image || undefined;
 
     // Broadcast toggle (starts on if the device is in "broadcast everything").
     const [isSharing, setIsSharing] = useState(() => getAutoBroadcast());
@@ -89,6 +107,9 @@ export default function WatchLivePage() {
                     onVideoElement={setVideoEl}
                     onHlsInstance={setHlsInstance}
                     onCorsFallback={() => setIsSharing(true)}
+                    // Watching someone else's broadcast follows their channel.
+                    onChannelStep={isJoining ? undefined : zap.step}
+                    overlaySlot={isJoining ? undefined : <ChannelBanner target={zap.banner} />}
                     topRightSlot={
                         <div className="flex items-center space-x-2">
                             {useRelay && canSync && <SyncButton role={isJoining ? 'viewer' : 'broadcaster'} onClick={sync} />}

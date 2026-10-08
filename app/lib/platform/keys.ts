@@ -69,3 +69,15 @@ const MEDIA_KEY_BY_CODE: Record<number, MediaKeyAction> = {
 export function getMediaKeyAction(event: KeyboardEvent): MediaKeyAction | null {
     return MEDIA_KEY_BY_NAME[event.key] ?? MEDIA_KEY_BY_CODE[event.keyCode] ?? null;
 }
+
+/**
+ * Direction requested by a remote's CH+/CH− rocker: `1` = next channel, `-1` =
+ * previous. webOS 5/6 and Tizen send `ChannelUp`/`ChannelDown`; webOS 4 only
+ * sets keyCode 33/34 (shared with PageUp/PageDown, which have no other use
+ * inside the player); Tizen's legacy codes are 427/428.
+ */
+export function getChannelKeyDirection(event: KeyboardEvent): 1 | -1 | null {
+    if (event.key === 'ChannelUp' || event.keyCode === 33 || event.keyCode === 427) return 1;
+    if (event.key === 'ChannelDown' || event.keyCode === 34 || event.keyCode === 428) return -1;
+    return null;
+}

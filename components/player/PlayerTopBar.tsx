@@ -20,6 +20,7 @@ export default function PlayerTopBar({ title, subtitle, onBack, rightSlot, visib
         <div
             className="absolute top-0 left-0 w-full p-4 bg-gradient-to-b from-black/85 to-transparent flex items-center justify-between space-x-3"
             aria-hidden={!visible}
+            data-player-topbar="true"
         >
             <div className="flex items-center space-x-3 min-w-0">
                 {onBack && (

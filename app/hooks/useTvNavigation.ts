@@ -33,7 +33,8 @@ export const useTvNavigation = () => {
             // somewhere left to go; at the edge they pass to the navigation,
             // which is what lets a remote cross a row of fields such as the
             // pairing form's code, name, profile and confirm button.
-            if (isFormControl && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') {
+            // Back is never the field's: it must leave even a range or a select.
+            if (isFormControl && !isBack && e.key !== 'ArrowUp' && e.key !== 'ArrowDown') {
                 // Enter belongs to the field: it submits, or opens a select.
                 if (e.key === 'Enter') return;
                 // A range is adjusted with the horizontal arrows and is never a

@@ -1,22 +1,23 @@
 'use client';
 
 import React from 'react';
-import { Maximize, Minimize, Pause, Play, RotateCcw, RotateCw, SkipBack, SkipForward, Subtitles } from 'lucide-react';
+import { ChevronDown, ChevronUp, Maximize, Minimize, Pause, Play, SkipBack, SkipForward, Subtitles } from 'lucide-react';
 import { useT } from '@/app/context/I18nContext';
 import Badge from '@/components/ui/Badge';
 import IconButton from '@/components/ui/IconButton';
 import SeekBar, { type SeekBarProps } from './SeekBar';
-import VolumeControl, { type VolumeControlProps } from './VolumeControl';
+import { formatTime } from './formatTime';
 
 export interface PlayerControlsProps {
     isPlaying: boolean;
     onTogglePlay: () => void;
-    onSkip: (seconds: number) => void;
     onPrevious?: () => void;
     onNext?: () => void;
     hasPrevious: boolean;
     hasNext: boolean;
     isLive: boolean;
+    /** Live only: previous/next channel buttons appear when set. */
+    onChannelStep?: (direction: 1 | -1) => void;
     currentTime: number;
     duration: number;
     subtitlesAvailable: boolean;
@@ -27,31 +28,17 @@ export interface PlayerControlsProps {
     isFullscreen: boolean;
     onToggleFullscreen: () => void;
     seek: SeekBarProps;
-    volume: VolumeControlProps;
-}
-
-// Mirrors the formatter that lived inline in VideoPlayer — this component
-// receives raw seconds (not a preformatted string), so it needs its own copy.
-function formatTime(time: number): string {
-    if (isNaN(time)) return '00:00';
-    const h = Math.floor(time / 3600);
-    const m = Math.floor((time % 3600) / 60);
-    const s = Math.floor(time % 60);
-    if (h > 0) {
-        return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-    }
-    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
 
 export default function PlayerControls({
     isPlaying,
     onTogglePlay,
-    onSkip,
     onPrevious,
     onNext,
     hasPrevious,
     hasNext,
     isLive,
+    onChannelStep,
     currentTime,
     duration,
     subtitlesAvailable,
@@ -61,7 +48,6 @@ export default function PlayerControls({
     isFullscreen,
     onToggleFullscreen,
     seek,
-    volume,
 }: PlayerControlsProps) {
     const t = useT();
     // D10 fix: only render when the callback exists AND the prop says there is
@@ -84,17 +70,16 @@ export default function PlayerControls({
                         <IconButton icon={SkipBack} label={t('player.previousEpisode')} onClick={onPrevious} className="focus-flat" />
                     )}
 
-                    <IconButton icon={RotateCcw} label={t('player.back10')} onClick={() => onSkip(-10)} className="focus-flat" />
-
                     <IconButton
                         icon={isPlaying ? Pause : Play}
                         label={isPlaying ? t('player.pause') : t('player.play')}
                         onClick={onTogglePlay}
                         size="lg"
                         className="focus-flat"
+                        // Where the D-pad lands when the controls wake up on a
+                        // live stream, and on Down from the seek bar.
+                        data-player-primary="true"
                     />
-
-                    <IconButton icon={RotateCw} label={t('player.forward10')} onClick={() => onSkip(10)} className="focus-flat" />
 
                     {showNext && (
                         <IconButton icon={SkipForward} label={t('player.nextEpisode')} onClick={onNext} className="focus-flat" />
@@ -108,7 +93,12 @@ export default function PlayerControls({
                         </div>
                     )}
 
-                    <VolumeControl {...volume} />
+                    {isLive && onChannelStep && (
+                        <>
+                            <IconButton icon={ChevronDown} label={t('player.previousChannel')} onClick={() => onChannelStep(-1)} className="focus-flat" />
+                            <IconButton icon={ChevronUp} label={t('player.nextChannel')} onClick={() => onChannelStep(1)} className="focus-flat" />
+                        </>
+                    )}
 
                     {isLive && (
                         <div className="ml-2">

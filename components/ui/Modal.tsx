@@ -85,6 +85,10 @@ export default function Modal({
         <div
             className="fixed inset-0 z-[100] bg-black/80 flex items-center justify-center p-4"
             onClick={onClose}
+            // Lets page-level key handlers (e.g. the video player) step aside
+            // while a modal owns the remote.
+            role="dialog"
+            aria-modal="true"
         >
             <div
                 ref={cardRef}

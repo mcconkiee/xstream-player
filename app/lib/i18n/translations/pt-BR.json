@@ -274,8 +274,6 @@
         "postpone": "Adiar 1 min",
         "skipToNext": "Pular para o próximo episódio",
         "previousEpisode": "Episódio anterior",
-        "back10": "Voltar 10 segundos",
-        "forward10": "Avançar 10 segundos",
         "pause": "Pausar",
         "play": "Reproduzir",
         "live": "Ao vivo",
@@ -287,9 +285,6 @@
         "disableSubtitles": "Desativar legendas",
         "enterFullscreen": "Modo tela cheia",
         "exitFullscreen": "Sair do modo tela cheia",
-        "mute": "Silenciar",
-        "unmute": "Ativar som",
-        "volumeControl": "Controle de volume",
         "videoProgress": "Progresso do vídeo",
         "back": "Voltar",
         "loadingSlow": "O carregamento está demorando.",
@@ -298,7 +293,11 @@
         "errorHlsUnsupported": "Seu navegador não suporta reprodução HLS.",
         "errorFormatUnsupported": "Formato de vídeo não suportado.",
         "errorPlayback": "Erro de reprodução: {message}",
-        "errorVideoLoad": "O vídeo não pôde ser carregado."
+        "errorVideoLoad": "O vídeo não pôde ser carregado.",
+        "previousChannel": "Canal anterior",
+        "nextChannel": "Próximo canal",
+        "startOver": "Assistir do início",
+        "resumedFrom": "Continuando de {time}"
     },
     "broadcast": {
         "start": "Transmitir",
