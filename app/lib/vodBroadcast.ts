@@ -203,6 +203,10 @@ function spawnFfmpeg(key: string, dir: string, upstreamUrl: string, startSeconds
         ...(startSeconds > 0 ? ['-ss', String(startSeconds)] : []),
         '-re',
         '-i', upstreamUrl,
+        // Subtitle tracks embedded in the file (mov_text etc.) cannot be copied into fMP4
+        // HLS: the muxer aborts with "Could not write header" before any segment exists,
+        // and the playlist request ends in a 504. The player loads subtitles on its own.
+        '-sn',
         '-c', 'copy',
         '-f', 'hls',
         '-hls_time', String(SEGMENT_DURATION),
