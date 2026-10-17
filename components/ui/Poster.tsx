@@ -2,8 +2,11 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { Star } from 'lucide-react';
+import { Bookmark, Star } from 'lucide-react';
 import Badge from './Badge';
+import IconButton from './IconButton';
+import { useFavorites, type FavoriteItem } from '@/app/context/FavoritesContext';
+import { useT } from '@/app/context/I18nContext';
 import { formatRating } from '@/app/lib/formatRating';
 
 export type PosterRatio = 'poster' | 'wide' | 'square';
@@ -21,6 +24,7 @@ export interface PosterProps {
     progress?: number;
     className?: string;
     onFocus?: React.FocusEventHandler<HTMLAnchorElement>;
+    favoriteItem?: FavoriteItem;
 }
 
 const RATIO_CLASSNAME: Record<PosterRatio, string> = {
@@ -41,7 +45,10 @@ export default function Poster({
     progress,
     className = '',
     onFocus,
+    favoriteItem,
 }: PosterProps) {
+    const t = useT();
+    const { isFavorite, addFavorite, removeFavorite } = useFavorites();
     // Tracked locally: `onError` on <img> only fires once per broken URL, so
     // we swap in a fallback block instead of leaving a hole in the layout.
     const [imageFailed, setImageFailed] = useState(false);
@@ -50,14 +57,24 @@ export default function Poster({
 
     const ratingLabel = formatRating(rating);
 
+    const saved = favoriteItem ? isFavorite(favoriteItem.id, favoriteItem.type) : false;
+    const toggleFavorite = (event: React.MouseEvent<HTMLButtonElement>) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!favoriteItem) return;
+        if (saved) removeFavorite(favoriteItem.id, favoriteItem.type);
+        else addFavorite(favoriteItem);
+    };
+
     return (
-        <Link
-            href={href}
-            data-focusable="true"
-            tabIndex={0}
-            onFocus={onFocus}
-            className={['spotlight-item focus-card block', className].join(' ')}
-        >
+        <div className={['relative', className].join(' ')}>
+            <Link
+                href={href}
+                data-focusable="true"
+                tabIndex={0}
+                onFocus={onFocus}
+                className="spotlight-item focus-card block"
+            >
             <div className={['ratio', RATIO_CLASSNAME[ratio], 'focus-card-target rounded-xl overflow-hidden bg-surface-2'].join(' ')}>
                 <div className="ratio-fill">
                     {showImage ? (
@@ -109,6 +126,19 @@ export default function Poster({
                     </p>
                 )}
             </div>
-        </Link>
+            </Link>
+            {favoriteItem && (
+                <div className="absolute top-2 right-2 z-10">
+                    <IconButton
+                        icon={Bookmark}
+                        label={saved ? t('favorites.inList') : t('favorites.addToList')}
+                        size="sm"
+                        variant="secondary"
+                        active={saved}
+                        onClick={toggleFavorite}
+                    />
+                </div>
+            )}
+        </div>
     );
 }

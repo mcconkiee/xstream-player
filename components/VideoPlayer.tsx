@@ -54,6 +54,7 @@ interface WebKitVideoElement extends HTMLVideoElement {
     webkitDisplayingFullscreen?: boolean;
     webkitEnterFullscreen?: () => void;
     webkitExitFullscreen?: () => void;
+    webkitShowPlaybackTargetPicker?: () => void;
 }
 
 interface WebKitFullscreenContainer extends HTMLDivElement {
@@ -247,6 +248,7 @@ export default function VideoPlayer({
     const containerRef = useRef<HTMLDivElement>(null);
     const [isPlaying, setIsPlaying] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
+    const [isAirPlayAvailable, setIsAirPlayAvailable] = useState(false);
     const [error, setError] = useState('');
     const [showControls, setShowControls] = useState(true);
     const [currentTime, setCurrentTime] = useState(0);
@@ -308,6 +310,27 @@ export default function VideoPlayer({
 
         return () => window.clearTimeout(timeoutId);
     }, [isBuffering, error]);
+
+    // Safari exposes AirPlay through WebKit-specific media-element events.
+    // Other browsers simply do not implement these APIs and never show the button.
+    useEffect(() => {
+        const video = videoRef.current as WebKitVideoElement | null;
+        if (!video || typeof video.webkitShowPlaybackTargetPicker !== 'function') {
+            setIsAirPlayAvailable(false);
+            return;
+        }
+
+        const handleAvailability = (event: Event) => {
+            const availability = (event as Event & { availability?: string }).availability;
+            setIsAirPlayAvailable(availability === 'available');
+        };
+
+        video.addEventListener('webkitplaybacktargetavailabilitychanged', handleAvailability);
+        return () => {
+            video.removeEventListener('webkitplaybacktargetavailabilitychanged', handleAvailability);
+            setIsAirPlayAvailable(false);
+        };
+    }, [src]);
 
     // Register custom back handler via navigation context
     useNavigationOverride(onBack ? () => {
@@ -1618,6 +1641,8 @@ export default function VideoPlayer({
                     onChangeFontSize={changeFontSize}
                     isFullscreen={isFullscreen}
                     onToggleFullscreen={toggleFullscreen}
+                    isAirPlayAvailable={isAirPlayAvailable}
+                    onAirPlay={() => (videoRef.current as WebKitVideoElement | null)?.webkitShowPlaybackTargetPicker?.()}
                     seek={seekBarProps}
                 />
             </div>

@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { ChevronDown, ChevronUp, Maximize, Minimize, Pause, Play, SkipBack, SkipForward, Subtitles } from 'lucide-react';
+import { Airplay, ChevronDown, ChevronUp, Maximize, Minimize, Pause, Play, SkipBack, SkipForward, Subtitles } from 'lucide-react';
 import { useT } from '@/app/context/I18nContext';
 import Badge from '@/components/ui/Badge';
 import IconButton from '@/components/ui/IconButton';
@@ -27,6 +27,8 @@ export interface PlayerControlsProps {
     onChangeFontSize: (delta: number) => void;
     isFullscreen: boolean;
     onToggleFullscreen: () => void;
+    isAirPlayAvailable: boolean;
+    onAirPlay: () => void;
     seek: SeekBarProps;
 }
 
@@ -47,6 +49,8 @@ export default function PlayerControls({
     onChangeFontSize,
     isFullscreen,
     onToggleFullscreen,
+    isAirPlayAvailable,
+    onAirPlay,
     seek,
 }: PlayerControlsProps) {
     const t = useT();
@@ -142,6 +146,15 @@ export default function PlayerControls({
                             label={subtitlesEnabled ? t('player.disableSubtitles') : t('player.enableSubtitles')}
                             onClick={onToggleSubtitles}
                             active={subtitlesEnabled}
+                            className="focus-flat"
+                        />
+                    )}
+
+                    {isAirPlayAvailable && (
+                        <IconButton
+                            icon={Airplay}
+                            label={t('player.airPlay')}
+                            onClick={onAirPlay}
                             className="focus-flat"
                         />
                     )}

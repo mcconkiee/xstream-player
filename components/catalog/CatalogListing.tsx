@@ -117,6 +117,13 @@ export default function CatalogListing({ type, categoryId, backHref, fallbackTit
                                 ratio={isLive ? 'square' : 'poster'}
                                 subtitle={!isLive ? (type === 'series' ? item.releaseDate : item.year?.toString()) : undefined}
                                 rating={!isLive ? item.rating : undefined}
+                                favoriteItem={{
+                                    id: item.id,
+                                    type: item.type,
+                                    name: item.name,
+                                    image: item.image,
+                                    rating: item.rating?.toString(),
+                                }}
                             />
                         ))}
                     </CardGrid>

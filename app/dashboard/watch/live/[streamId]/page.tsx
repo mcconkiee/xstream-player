@@ -15,6 +15,7 @@ import { apiUrl } from '@/app/lib/apiClient';
 import { useLiveChannelZap } from '@/app/hooks/useLiveChannelZap';
 import type { CatalogItem } from '@/app/lib/catalogItem';
 import ChannelBanner from '@/components/player/ChannelBanner';
+import FavoriteButton from '@/components/FavoriteButton';
 
 export default function WatchLivePage() {
     const { credentials } = useAuth();
@@ -113,6 +114,10 @@ export default function WatchLivePage() {
                     topRightSlot={
                         <div className="flex items-center space-x-2">
                             {useRelay && canSync && <SyncButton role={isJoining ? 'viewer' : 'broadcaster'} onClick={sync} />}
+                            <FavoriteButton
+                                size="md"
+                                item={{ id: streamId, type: 'live', name: title, image: poster }}
+                            />
                             {shareToggle}
                         </div>
                     }

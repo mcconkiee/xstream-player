@@ -285,6 +285,7 @@
         "disableSubtitles": "Disable subtitles",
         "enterFullscreen": "Fullscreen",
         "exitFullscreen": "Exit fullscreen",
+        "airPlay": "AirPlay",
         "videoProgress": "Video progress",
         "back": "Back",
         "loadingSlow": "Loading is taking a while.",
